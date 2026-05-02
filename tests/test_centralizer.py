@@ -7,6 +7,7 @@ from typenx_addon_season_centralizer.addon import (
     expand_episode_fallback_refs,
     expand_season_refs,
     fill_missing_episode_air_dates,
+    fill_missing_episode_thumbnails,
 )
 
 
@@ -227,6 +228,59 @@ class SeasonCentralizerTests(unittest.TestCase):
         )
 
         self.assertEqual(fallback_refs, [{"source": "kitsu", "id": "12"}])
+
+    def test_fills_missing_episode_thumbnails_from_backup_episode(self):
+        combined = self._metadata("central", "One Piece", "1999-10-20", 0)
+        combined["episodes"] = [
+            {
+                "id": "central:427",
+                "anime_id": "central",
+                "season_number": 13,
+                "number": 427,
+                "title": "A Special Presentation Related to the Movie!",
+                "synopsis": None,
+                "thumbnail": None,
+                "aired_at": None,
+            }
+        ]
+        backup = self._metadata("backup", "One Piece", "1999-10-20", 0)
+        backup["episodes"] = [
+            {
+                "id": "backup:427",
+                "anime_id": "backup",
+                "season_number": 13,
+                "number": 427,
+                "title": "A Special Presentation Related to the Movie!",
+                "synopsis": None,
+                "thumbnail": "https://example.test/episode-427.jpg",
+                "aired_at": None,
+            }
+        ]
+
+        filled = fill_missing_episode_thumbnails(combined, [backup])
+
+        self.assertEqual(filled["episodes"][0]["thumbnail"], "https://example.test/episode-427.jpg")
+
+    def test_fills_remaining_episode_thumbnails_from_show_artwork(self):
+        combined = self._metadata("central", "One Piece", "1999-10-20", 0)
+        combined["episodes"] = [
+            {
+                "id": "central:428",
+                "anime_id": "central",
+                "season_number": 13,
+                "number": 428,
+                "title": "Episode 428",
+                "synopsis": None,
+                "thumbnail": None,
+                "aired_at": None,
+            }
+        ]
+        backup = self._metadata("backup", "One Piece", "1999-10-20", 0)
+        backup["poster"] = "https://example.test/one-piece-poster.jpg"
+
+        filled = fill_missing_episode_thumbnails(combined, [backup])
+
+        self.assertEqual(filled["episodes"][0]["thumbnail"], "https://example.test/one-piece-poster.jpg")
 
     def _metadata(self, anime_id, title, start_date, episode_count):
         return {

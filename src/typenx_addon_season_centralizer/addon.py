@@ -78,6 +78,7 @@ def create_addon():
             client.get_json(source_by_key(sources, ref["source"]).base_url, f"anime/{ref['id']}")
             for ref in refs
         ]
+        original_seasons = list(seasons)
         if not has_episode_rows(seasons):
             fallback_refs = expand_episode_fallback_refs(client, sources, refs, seasons)
             fallback_seasons = [
@@ -85,8 +86,16 @@ def create_addon():
                 for ref in fallback_refs
             ]
             if has_episode_rows(fallback_seasons):
+                refs = fallback_refs
                 seasons = fallback_seasons
-        return fill_missing_episode_air_dates(combine_anime_seasons(seasons), seasons)
+        thumbnail_sources = [
+            *seasons,
+            *original_seasons,
+            *collect_thumbnail_backup_seasons(client, sources, refs, [*seasons, *original_seasons]),
+        ]
+        combined = combine_anime_seasons(seasons)
+        combined = fill_missing_episode_air_dates(combined, seasons)
+        return fill_missing_episode_thumbnails(combined, thumbnail_sources)
 
     return create_typenx_addon(
         manifest={
@@ -257,6 +266,46 @@ def has_episode_rows(seasons: list[AnimeMetadata]) -> bool:
     return any(season.get("episodes") for season in seasons)
 
 
+def collect_thumbnail_backup_seasons(
+    client: UpstreamClient,
+    sources: list[Source],
+    refs: list[dict[str, str]],
+    seasons: list[AnimeMetadata],
+) -> list[AnimeMetadata]:
+    used_sources = {ref["source"] for ref in refs}
+    title_keys = metadata_title_keys(seasons)
+    queries = metadata_queries(seasons)
+    if not title_keys or not queries:
+        return []
+
+    backups: list[AnimeMetadata] = []
+    seen: set[tuple[str, str]] = {(ref["source"], ref["id"]) for ref in refs}
+    for source in sources:
+        if source.key in used_sources:
+            continue
+        for query in sorted(queries):
+            try:
+                response = client.post_json(
+                    source.base_url,
+                    "search",
+                    {"query": query, "limit": 20},
+                )
+            except (OSError, URLError, TimeoutError):
+                continue
+            for item in response.get("items", []):
+                if normalize_title_key(item["title"]) not in title_keys:
+                    continue
+                key = (source.key, item["id"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    backups.append(client.get_json(source.base_url, f"anime/{item['id']}"))
+                except (OSError, URLError, TimeoutError):
+                    continue
+    return backups
+
+
 def fill_missing_episode_air_dates(
     combined: AnimeMetadata,
     seasons: list[AnimeMetadata],
@@ -276,6 +325,82 @@ def fill_missing_episode_air_dates(
         episode["aired_at"] = iso_date_at_midnight(start + timedelta(days=(episode_number - 1) * 7))
 
     return combined
+
+
+def fill_missing_episode_thumbnails(
+    combined: AnimeMetadata,
+    sources: list[AnimeMetadata],
+) -> AnimeMetadata:
+    episode_thumbnails = episode_thumbnail_lookup(sources)
+    season_art = season_artwork_lookup(sources)
+    show_art = next(
+        (
+            artwork
+            for metadata in sources
+            for artwork in [metadata.get("poster"), metadata.get("banner")]
+            if artwork
+        ),
+        None,
+    )
+
+    for episode in combined.get("episodes", []):
+        if episode.get("thumbnail"):
+            continue
+        season_number = episode.get("season_number")
+        episode_number = episode.get("number")
+        title_key = normalize_title_key(episode["title"]) if episode.get("title") else None
+        thumbnail = episode_thumbnails.get((season_number, episode_number))
+        if not thumbnail and title_key:
+            thumbnail = episode_thumbnails.get((season_number, title_key))
+        if not thumbnail:
+            thumbnail = episode_thumbnails.get((None, episode_number))
+        if not thumbnail and title_key:
+            thumbnail = episode_thumbnails.get((None, title_key))
+        if not thumbnail:
+            thumbnail = season_art.get(season_number) or show_art
+        if thumbnail:
+            episode["thumbnail"] = thumbnail
+
+    return combined
+
+
+def episode_thumbnail_lookup(sources: list[AnimeMetadata]) -> dict[tuple[int | None, int | str], str]:
+    thumbnails: dict[tuple[int | None, int | str], str] = {}
+    for season_number, metadata in inferred_season_metadata(sources):
+        for episode in metadata.get("episodes", []):
+            thumbnail = episode.get("thumbnail")
+            if not thumbnail:
+                continue
+            episode_number = episode.get("number")
+            effective_season_number = episode.get("season_number") or season_number
+            if isinstance(episode_number, int):
+                thumbnails.setdefault((effective_season_number, episode_number), thumbnail)
+                thumbnails.setdefault((None, episode_number), thumbnail)
+            title = episode.get("title")
+            if isinstance(title, str) and title.strip():
+                title_key = normalize_title_key(title)
+                thumbnails.setdefault((effective_season_number, title_key), thumbnail)
+                thumbnails.setdefault((None, title_key), thumbnail)
+    return thumbnails
+
+
+def season_artwork_lookup(sources: list[AnimeMetadata]) -> dict[int, str]:
+    artwork: dict[int, str] = {}
+    for season_number, metadata in inferred_season_metadata(sources):
+        image = metadata.get("poster") or metadata.get("banner")
+        if image:
+            artwork.setdefault(season_number, image)
+    return artwork
+
+
+def inferred_season_metadata(seasons: list[AnimeMetadata]) -> list[tuple[int, AnimeMetadata]]:
+    inferred: list[tuple[int, AnimeMetadata]] = []
+    used_season_numbers: set[int] = set()
+    for season in sorted_seasons(seasons):
+        season_number = season_number_of(season["title"]) or next_later_season_number(used_season_numbers)
+        used_season_numbers.add(season_number)
+        inferred.append((season_number, season))
+    return inferred
 
 
 def season_start_dates(seasons: list[AnimeMetadata]) -> dict[int, date]:
