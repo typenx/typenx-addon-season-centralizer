@@ -72,6 +72,7 @@ def create_addon():
 
     def anime(anime_id: str) -> AnimeMetadata:
         refs = decode_refs(anime_id)
+        refs = expand_season_refs(client, sources, refs)
         seasons = [
             client.get_json(source_by_key(sources, ref["source"]).base_url, f"anime/{ref['id']}")
             for ref in refs
@@ -125,6 +126,61 @@ def collect_previews(sources: list[Source], load) -> list[tuple[Source, AnimePre
         for item in response.get("items", []):
             items.append((source, item))
     return items
+
+
+def expand_season_refs(
+    client: UpstreamClient,
+    sources: list[Source],
+    refs: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    seasons = [
+        (
+            source_by_key(sources, ref["source"]),
+            client.get_json(source_by_key(sources, ref["source"]).base_url, f"anime/{ref['id']}"),
+        )
+        for ref in refs
+    ]
+    title_keys_by_source: dict[str, set[str]] = {}
+    queries_by_source: dict[str, set[str]] = {}
+    for source, metadata in seasons:
+        titles = [
+            metadata["title"],
+            *metadata.get("alternative_titles", []),
+            metadata.get("original_title"),
+        ]
+        normalized_titles = [
+            base_show_title(title)
+            for title in titles
+            if isinstance(title, str) and title.strip()
+        ]
+        title_keys_by_source.setdefault(source.key, set()).update(
+            normalize_title_key(title) for title in normalized_titles
+        )
+        queries_by_source.setdefault(source.key, set()).update(normalized_titles)
+
+    expanded = list(refs)
+    seen = {(ref["source"], ref["id"]) for ref in refs}
+    for source in {source for source, _ in seasons}:
+        source_keys = title_keys_by_source.get(source.key, set())
+        for query in sorted(queries_by_source.get(source.key, set())):
+            try:
+                response = client.post_json(
+                    source.base_url,
+                    "search",
+                    {"query": query, "limit": 20},
+                )
+            except (OSError, URLError, TimeoutError):
+                continue
+            for item in response.get("items", []):
+                if normalize_title_key(item["title"]) not in source_keys:
+                    continue
+                key = (source.key, item["id"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                expanded.append({"source": source.key, "id": item["id"]})
+
+    return expanded
 
 
 def centralize_source_previews(items: list[tuple[Source, AnimePreview]]) -> list[AnimePreview]:
