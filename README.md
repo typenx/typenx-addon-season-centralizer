@@ -1,33 +1,38 @@
 # Typenx Season Centralizer Addon
 
-This addon sits in front of the MAL, AniList, and Kitsu metadata addons and presents split seasons as one centralized show.
+Collapse split-season anime releases into one centralized show.
 
-For example, if upstream search returns `Attack on Titan`, `Attack on Titan Season 2`, and `Attack on Titan 3rd Season`, this addon returns one `Attack on Titan` result with all source season entries attached. Opening that result fetches each upstream season and merges the metadata into one show with season-numbered episodes.
+Anime metadata providers don't agree on what counts as a "show." MyAnimeList, AniList, and Kitsu all tend to split long-running anime into separate records: *Attack on Titan*, *Attack on Titan Season 2*, *Attack on Titan: The Final Season*, and so on — each with its own poster, its own episode numbering, its own ID. That makes any library built directly on top of those providers feel scattered.
 
-It is part of Typenx, a self-hostable anime discovery platform built around open addons. If cleaner anime libraries sound useful, star [typenx-core](https://github.com/typenx/typenx-core).
+This addon sits between the metadata addons and [Typenx Core](https://github.com/typenx/typenx-core) and presents those split releases as one show with merged season-numbered episodes. Search for *Attack on Titan* and you get one result; open it and you get a unified episode list across all the source seasons.
 
 ## Run
 
 ```powershell
-$env:PYTHONPATH="../typenx-addon-python-sdk/src;src"
 $env:PORT="8790"
-python -m typenx_addon_season_centralizer
+cargo run
 ```
 
-By default it reads from:
+By default it reads from the official addon ports:
 
-- `http://127.0.0.1:8787`
-- `http://127.0.0.1:8788`
-- `http://127.0.0.1:8789`
+- `http://127.0.0.1:8787` — MyAnimeList
+- `http://127.0.0.1:8788` — AniList
+- `http://127.0.0.1:8789` — Kitsu
 
-Override this with `TYPENX_SEASON_SOURCES`:
+Override with `TYPENX_SEASON_SOURCES`:
 
 ```powershell
 $env:TYPENX_SEASON_SOURCES="http://127.0.0.1:8787,http://127.0.0.1:8788,http://127.0.0.1:8789"
 ```
 
-Season Centralizer also enriches missing episode thumbnails from TVMaze episode images when available. Disable that external lookup with:
+## Episode thumbnails
+
+Season Centralizer enriches missing episode thumbnails from TVMaze episode images when available. Disable that external lookup with:
 
 ```powershell
 $env:TYPENX_TVMAZE_EPISODE_IMAGES="0"
 ```
+
+## Why this is its own addon
+
+The centralization logic could live inside each metadata addon, but it shouldn't — different users want different behavior (some prefer per-season cards, some don't), and the merge logic relies on cross-provider matching that gets cleaner with more sources, not fewer. Making it its own addon keeps the metadata addons honest and lets the centralizer evolve on its own cadence.
