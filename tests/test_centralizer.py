@@ -5,6 +5,7 @@ from typenx_addon_season_centralizer.addon import (
     centralize_source_previews,
     decode_refs,
     expand_season_refs,
+    fill_missing_episode_air_dates,
 )
 
 
@@ -104,6 +105,76 @@ class SeasonCentralizerTests(unittest.TestCase):
             refs,
             [{"source": "mal", "id": "52991"}, {"source": "mal", "id": "59978"}],
         )
+
+    def test_fills_missing_episode_air_dates_from_season_start(self):
+        first = self._metadata("52991", "Sousou no Frieren", "2023-09-29", 2)
+        second = self._metadata("59978", "Sousou no Frieren 2nd Season", "2026-01-16", 2)
+        combined = {
+            "episodes": [
+                {
+                    "id": "52991:1",
+                    "anime_id": "central:52991,59978",
+                    "season_number": 1,
+                    "number": 1,
+                    "title": "Episode 1",
+                    "synopsis": None,
+                    "thumbnail": None,
+                    "aired_at": None,
+                },
+                {
+                    "id": "59978:2",
+                    "anime_id": "central:52991,59978",
+                    "season_number": 2,
+                    "number": 2,
+                    "title": "Episode 2",
+                    "synopsis": None,
+                    "thumbnail": None,
+                    "aired_at": None,
+                },
+            ]
+        }
+
+        filled = fill_missing_episode_air_dates(combined, [second, first])
+
+        self.assertEqual(filled["episodes"][0]["aired_at"], "2023-09-29T00:00:00Z")
+        self.assertEqual(filled["episodes"][1]["aired_at"], "2026-01-23T00:00:00Z")
+
+    def _metadata(self, anime_id, title, start_date, episode_count):
+        return {
+            "id": anime_id,
+            "title": title,
+            "original_title": None,
+            "alternative_titles": [],
+            "synopsis": None,
+            "description": None,
+            "poster": None,
+            "banner": None,
+            "year": int(start_date[:4]),
+            "season": None,
+            "season_year": int(start_date[:4]),
+            "status": None,
+            "content_type": "anime",
+            "source": None,
+            "duration_minutes": None,
+            "episode_count": episode_count,
+            "score": None,
+            "rank": None,
+            "popularity": None,
+            "rating": None,
+            "genres": [],
+            "tags": [],
+            "authors": [],
+            "studios": [],
+            "staff": [],
+            "country_of_origin": "JP",
+            "start_date": start_date,
+            "end_date": None,
+            "site_url": None,
+            "trailer_url": None,
+            "external_links": [],
+            "episodes": [],
+            "updated_at": None,
+        }
 
 
 if __name__ == "__main__":

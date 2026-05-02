@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urljoin
@@ -77,7 +78,7 @@ def create_addon():
             client.get_json(source_by_key(sources, ref["source"]).base_url, f"anime/{ref['id']}")
             for ref in refs
         ]
-        return combine_anime_seasons(seasons)
+        return fill_missing_episode_air_dates(combine_anime_seasons(seasons), seasons)
 
     return create_typenx_addon(
         manifest={
@@ -181,6 +182,67 @@ def expand_season_refs(
                 expanded.append({"source": source.key, "id": item["id"]})
 
     return expanded
+
+
+def fill_missing_episode_air_dates(
+    combined: AnimeMetadata,
+    seasons: list[AnimeMetadata],
+) -> AnimeMetadata:
+    starts = season_start_dates(seasons)
+    if not starts:
+        return combined
+
+    for episode in combined.get("episodes", []):
+        if episode.get("aired_at"):
+            continue
+        season_number = episode.get("season_number")
+        episode_number = episode.get("number")
+        start = starts.get(season_number)
+        if not start or not isinstance(episode_number, int) or episode_number < 1:
+            continue
+        episode["aired_at"] = iso_date_at_midnight(start + timedelta(days=(episode_number - 1) * 7))
+
+    return combined
+
+
+def season_start_dates(seasons: list[AnimeMetadata]) -> dict[int, date]:
+    starts: dict[int, date] = {}
+    used_season_numbers: set[int] = set()
+    for season in sorted_seasons(seasons):
+        season_number = season_number_of(season["title"]) or next_later_season_number(used_season_numbers)
+        used_season_numbers.add(season_number)
+        start = parse_date(season.get("start_date"))
+        if start:
+            starts[season_number] = start
+    return starts
+
+
+def sorted_seasons(seasons: list[AnimeMetadata]) -> list[AnimeMetadata]:
+    return sorted(
+        seasons,
+        key=lambda item: (
+            item.get("season_year") or item.get("year") or 0,
+            item.get("start_date") or "",
+            season_number_of(item["title"]) or 1,
+        ),
+    )
+
+
+def next_later_season_number(used: set[int]) -> int:
+    return max(used, default=0) + 1
+
+
+def parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def iso_date_at_midnight(value: date) -> str:
+    return datetime.combine(value, datetime.min.time(), timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def centralize_source_previews(items: list[tuple[Source, AnimePreview]]) -> list[AnimePreview]:
