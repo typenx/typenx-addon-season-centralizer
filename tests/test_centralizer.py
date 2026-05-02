@@ -6,6 +6,7 @@ from typenx_addon_season_centralizer.addon import (
     decode_refs,
     expand_episode_fallback_refs,
     expand_season_refs,
+    collect_tvmaze_episode_image_sources,
     fill_missing_episode_air_dates,
     fill_missing_episode_thumbnails,
 )
@@ -128,6 +129,51 @@ class FakeClient:
             "episodes": episodes,
             "updated_at": None,
         }
+
+
+class FakeTvMazeClient:
+    def get_json(self, _base_url, path):
+        if path == "search/shows?q=One%20Piece":
+            return [
+                {
+                    "show": {
+                        "id": 46065,
+                        "name": "One Piece",
+                        "language": "English",
+                        "premiered": "2023-08-31",
+                        "image": {"original": "https://example.test/live-action.jpg"},
+                    }
+                },
+                {
+                    "show": {
+                        "id": 1505,
+                        "name": "One Piece",
+                        "language": "Japanese",
+                        "premiered": "1999-10-20",
+                        "image": {"original": "https://example.test/anime.jpg"},
+                    }
+                },
+            ]
+        if path == "shows/1505/episodes":
+            return [
+                {
+                    "id": 256125,
+                    "season": 1999,
+                    "number": 1,
+                    "name": "I'm Luffy! The Man Who Will Become the Pirate King!",
+                    "airdate": "1999-10-20",
+                    "image": {"original": "https://example.test/one-piece-1.jpg"},
+                },
+                {
+                    "id": 735945,
+                    "season": 2009,
+                    "number": 44,
+                    "name": "A Special Presentation Related to the Movie! Little East Blue in Danger!",
+                    "airdate": "2009-11-22",
+                    "image": {"original": "https://example.test/one-piece-427.jpg"},
+                },
+            ]
+        raise AssertionError(f"unexpected path: {path}")
 
 
 class SeasonCentralizerTests(unittest.TestCase):
@@ -281,6 +327,39 @@ class SeasonCentralizerTests(unittest.TestCase):
         filled = fill_missing_episode_thumbnails(combined, [backup])
 
         self.assertEqual(filled["episodes"][0]["thumbnail"], "https://example.test/one-piece-poster.jpg")
+
+    def test_collects_tvmaze_episode_image_source_for_matching_anime(self):
+        source = collect_tvmaze_episode_image_sources(
+            FakeTvMazeClient(),
+            [self._metadata("21", "One Piece", "1999-10-20", 0)],
+        )
+
+        self.assertEqual(len(source), 1)
+        self.assertEqual(source[0]["id"], "1505")
+        self.assertEqual(source[0]["episodes"][1]["thumbnail"], "https://example.test/one-piece-427.jpg")
+
+    def test_fills_missing_episode_thumbnail_from_tvmaze_air_date(self):
+        combined = self._metadata("central", "One Piece", "1999-10-20", 0)
+        combined["episodes"] = [
+            {
+                "id": "central:427",
+                "anime_id": "central",
+                "season_number": 13,
+                "number": 427,
+                "title": "Different Provider Title",
+                "synopsis": None,
+                "thumbnail": None,
+                "aired_at": "2009-11-22T00:00:00Z",
+            }
+        ]
+        sources = collect_tvmaze_episode_image_sources(
+            FakeTvMazeClient(),
+            [self._metadata("21", "One Piece", "1999-10-20", 0)],
+        )
+
+        filled = fill_missing_episode_thumbnails(combined, sources)
+
+        self.assertEqual(filled["episodes"][0]["thumbnail"], "https://example.test/one-piece-427.jpg")
 
     def _metadata(self, anime_id, title, start_date, episode_count):
         return {

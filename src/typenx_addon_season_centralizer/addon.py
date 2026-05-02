@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 
 from typenx_addon_python_sdk import (
@@ -29,6 +29,7 @@ DEFAULT_SOURCES = [
     "http://127.0.0.1:8788",
     "http://127.0.0.1:8789",
 ]
+TVMAZE_BASE_URL = "https://api.tvmaze.com"
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ def create_addon():
             *seasons,
             *original_seasons,
             *collect_thumbnail_backup_seasons(client, sources, refs, [*seasons, *original_seasons]),
+            *collect_tvmaze_episode_image_sources(client, [*seasons, *original_seasons]),
         ]
         combined = combine_anime_seasons(seasons)
         combined = fill_missing_episode_air_dates(combined, seasons)
@@ -306,6 +308,126 @@ def collect_thumbnail_backup_seasons(
     return backups
 
 
+def collect_tvmaze_episode_image_sources(
+    client: UpstreamClient,
+    seasons: list[AnimeMetadata],
+) -> list[AnimeMetadata]:
+    if os.environ.get("TYPENX_TVMAZE_EPISODE_IMAGES", "1").lower() in {"0", "false", "no"}:
+        return []
+
+    title_keys = metadata_title_keys(seasons)
+    queries = metadata_queries(seasons)
+    years = {
+        year
+        for metadata in seasons
+        for year in [metadata.get("season_year"), metadata.get("year"), year_of(metadata.get("start_date"))]
+        if isinstance(year, int)
+    }
+    candidates: dict[int, dict[str, Any]] = {}
+    for query in sorted(queries):
+        try:
+            response = client.get_json(TVMAZE_BASE_URL, f"search/shows?q={quote(query)}")
+        except (OSError, URLError, TimeoutError):
+            continue
+        for result in response:
+            show = result.get("show") if isinstance(result, dict) else None
+            if not isinstance(show, dict):
+                continue
+            show_id = show.get("id")
+            name = show.get("name")
+            if not isinstance(show_id, int) or not isinstance(name, str):
+                continue
+            if normalize_title_key(name) not in title_keys:
+                continue
+            current = candidates.get(show_id)
+            if not current or tvmaze_show_score(show, years) > tvmaze_show_score(current, years):
+                candidates[show_id] = show
+
+    if not candidates:
+        return []
+
+    best_show = max(candidates.values(), key=lambda show: tvmaze_show_score(show, years))
+    try:
+        episodes = client.get_json(TVMAZE_BASE_URL, f"shows/{best_show['id']}/episodes")
+    except (OSError, URLError, TimeoutError):
+        return []
+
+    mapped_episodes = []
+    for episode in episodes:
+        image = episode.get("image") if isinstance(episode, dict) else None
+        thumbnail = image.get("original") or image.get("medium") if isinstance(image, dict) else None
+        if not thumbnail:
+            continue
+        mapped_episodes.append(
+            {
+                "id": str(episode.get("id")),
+                "anime_id": str(best_show["id"]),
+                "season_number": None,
+                "number": episode.get("number") if isinstance(episode.get("number"), int) else 0,
+                "title": episode.get("name") if isinstance(episode.get("name"), str) else None,
+                "synopsis": None,
+                "thumbnail": thumbnail,
+                "aired_at": iso_date_string(episode.get("airdate")),
+                "source": "TVMaze",
+            }
+        )
+
+    if not mapped_episodes:
+        return []
+
+    premiered = best_show.get("premiered") if isinstance(best_show.get("premiered"), str) else None
+    image = best_show.get("image") if isinstance(best_show.get("image"), dict) else {}
+    return [
+        {
+            "id": str(best_show["id"]),
+            "title": best_show.get("name") or next(iter(metadata_titles(seasons))),
+            "original_title": None,
+            "alternative_titles": [],
+            "synopsis": None,
+            "description": None,
+            "poster": image.get("original") or image.get("medium"),
+            "banner": None,
+            "year": year_of(premiered),
+            "season": None,
+            "season_year": year_of(premiered),
+            "status": None,
+            "content_type": "anime",
+            "source": "TVMaze",
+            "duration_minutes": None,
+            "episode_count": len(mapped_episodes),
+            "score": None,
+            "rank": None,
+            "popularity": None,
+            "rating": None,
+            "genres": [],
+            "tags": [],
+            "authors": [],
+            "studios": [],
+            "staff": [],
+            "country_of_origin": None,
+            "start_date": premiered,
+            "end_date": None,
+            "site_url": best_show.get("url") if isinstance(best_show.get("url"), str) else None,
+            "trailer_url": None,
+            "external_links": [],
+            "episodes": mapped_episodes,
+            "updated_at": None,
+        }
+    ]
+
+
+def tvmaze_show_score(show: dict[str, Any], years: set[int]) -> int:
+    score = 0
+    if show.get("language") == "Japanese":
+        score += 100
+    premiered_year = year_of(show.get("premiered") if isinstance(show.get("premiered"), str) else None)
+    if premiered_year in years:
+        score += 50
+    elif premiered_year and years:
+        score += max(0, 20 - min(abs(premiered_year - year) for year in years))
+    return score
+
+
 def fill_missing_episode_air_dates(
     combined: AnimeMetadata,
     seasons: list[AnimeMetadata],
@@ -357,6 +479,10 @@ def fill_missing_episode_thumbnails(
         if not thumbnail and title_key:
             thumbnail = episode_thumbnails.get((None, title_key))
         if not thumbnail:
+            aired_at = date_key(episode.get("aired_at"))
+            if aired_at:
+                thumbnail = episode_thumbnails.get((None, aired_at))
+        if not thumbnail:
             thumbnail = season_art.get(season_number) or show_art
         if thumbnail:
             episode["thumbnail"] = thumbnail
@@ -381,6 +507,9 @@ def episode_thumbnail_lookup(sources: list[AnimeMetadata]) -> dict[tuple[int | N
                 title_key = normalize_title_key(title)
                 thumbnails.setdefault((effective_season_number, title_key), thumbnail)
                 thumbnails.setdefault((None, title_key), thumbnail)
+            aired_at = date_key(episode.get("aired_at"))
+            if aired_at:
+                thumbnails.setdefault((None, aired_at), thumbnail)
     return thumbnails
 
 
@@ -437,6 +566,21 @@ def parse_date(value: str | None) -> date | None:
         return date.fromisoformat(value[:10])
     except ValueError:
         return None
+
+
+def year_of(value: str | None) -> int | None:
+    parsed = parse_date(value)
+    return parsed.year if parsed else None
+
+
+def iso_date_string(value: str | None) -> str | None:
+    parsed = parse_date(value)
+    return iso_date_at_midnight(parsed) if parsed else None
+
+
+def date_key(value: str | None) -> str | None:
+    parsed = parse_date(value)
+    return parsed.isoformat() if parsed else None
 
 
 def iso_date_at_midnight(value: date) -> str:

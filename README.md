@@ -23,3 +23,9 @@ Override this with `TYPENX_SEASON_SOURCES`:
 ```powershell
 $env:TYPENX_SEASON_SOURCES="http://127.0.0.1:8787,http://127.0.0.1:8788,http://127.0.0.1:8789"
 ```
+
+Season Centralizer also enriches missing episode thumbnails from TVMaze episode images when available. Disable that external lookup with:
+
+```powershell
+$env:TYPENX_TVMAZE_EPISODE_IMAGES="0"
+```
