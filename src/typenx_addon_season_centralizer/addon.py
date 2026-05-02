@@ -78,6 +78,14 @@ def create_addon():
             client.get_json(source_by_key(sources, ref["source"]).base_url, f"anime/{ref['id']}")
             for ref in refs
         ]
+        if not has_episode_rows(seasons):
+            fallback_refs = expand_episode_fallback_refs(client, sources, refs, seasons)
+            fallback_seasons = [
+                client.get_json(source_by_key(sources, ref["source"]).base_url, f"anime/{ref['id']}")
+                for ref in fallback_refs
+            ]
+            if has_episode_rows(fallback_seasons):
+                seasons = fallback_seasons
         return fill_missing_episode_air_dates(combine_anime_seasons(seasons), seasons)
 
     return create_typenx_addon(
@@ -182,6 +190,71 @@ def expand_season_refs(
                 expanded.append({"source": source.key, "id": item["id"]})
 
     return expanded
+
+
+def expand_episode_fallback_refs(
+    client: UpstreamClient,
+    sources: list[Source],
+    refs: list[dict[str, str]],
+    seasons: list[AnimeMetadata],
+) -> list[dict[str, str]]:
+    used_sources = {ref["source"] for ref in refs}
+    title_keys = metadata_title_keys(seasons)
+    queries = metadata_queries(seasons)
+    if not title_keys or not queries:
+        return refs
+
+    fallback_refs: list[dict[str, str]] = []
+    for source in sources:
+        if source.key in used_sources:
+            continue
+        for query in sorted(queries):
+            try:
+                response = client.post_json(
+                    source.base_url,
+                    "search",
+                    {"query": query, "limit": 20},
+                )
+            except (OSError, URLError, TimeoutError):
+                continue
+            for item in response.get("items", []):
+                if normalize_title_key(item["title"]) in title_keys:
+                    fallback_refs.append({"source": source.key, "id": item["id"]})
+                    break
+            if fallback_refs and fallback_refs[-1]["source"] == source.key:
+                break
+
+    return fallback_refs or refs
+
+
+def metadata_title_keys(seasons: list[AnimeMetadata]) -> set[str]:
+    return {
+        normalize_title_key(title)
+        for title in metadata_titles(seasons)
+    }
+
+
+def metadata_queries(seasons: list[AnimeMetadata]) -> set[str]:
+    return {base_show_title(title) for title in metadata_titles(seasons)}
+
+
+def metadata_titles(seasons: list[AnimeMetadata]) -> list[str]:
+    titles: list[str] = []
+    for metadata in seasons:
+        titles.extend(
+            title
+            for title in [
+                metadata["title"],
+                *metadata.get("alternative_titles", []),
+                metadata.get("original_title"),
+            ]
+            if isinstance(title, str) and title.strip()
+        )
+    return titles
+
+
+def has_episode_rows(seasons: list[AnimeMetadata]) -> bool:
+    return any(season.get("episodes") for season in seasons)
 
 
 def fill_missing_episode_air_dates(
