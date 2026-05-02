@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+from dataclasses import dataclass
+from typing import Any
+from urllib.error import URLError
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
+
+from typenx_addon_python_sdk import (
+    AnimeMetadata,
+    AnimePreview,
+    CatalogRequest,
+    CatalogResponse,
+    SearchRequest,
+    base_show_title,
+    combine_anime_seasons,
+    create_typenx_addon,
+    normalize_title_key,
+    season_number_of,
+    serve_typenx_addon,
+)
+
+DEFAULT_SOURCES = [
+    "http://127.0.0.1:8787",
+    "http://127.0.0.1:8788",
+    "http://127.0.0.1:8789",
+]
+
+
+@dataclass(frozen=True)
+class Source:
+    key: str
+    base_url: str
+
+
+def create_addon():
+    sources = configured_sources()
+    client = UpstreamClient()
+
+    def catalog(request: CatalogRequest) -> CatalogResponse:
+        items = collect_previews(
+            sources,
+            lambda source: client.post_json(
+                source.base_url,
+                "catalog",
+                {
+                    "catalog_id": request["catalog_id"],
+                    "skip": request.get("skip"),
+                    "limit": request.get("limit"),
+                    "query": request.get("query"),
+                },
+            ),
+        )
+        return {"items": centralize_source_previews(items)}
+
+    def search(request: SearchRequest) -> CatalogResponse:
+        items = collect_previews(
+            sources,
+            lambda source: client.post_json(
+                source.base_url,
+                "search",
+                {
+                    "query": request["query"],
+                    "limit": request.get("limit"),
+                },
+            ),
+        )
+        return {"items": centralize_source_previews(items)}
+
+    def anime(anime_id: str) -> AnimeMetadata:
+        refs = decode_refs(anime_id)
+        seasons = [
+            client.get_json(source_by_key(sources, ref["source"]).base_url, f"anime/{ref['id']}")
+            for ref in refs
+        ]
+        return combine_anime_seasons(seasons)
+
+    return create_typenx_addon(
+        manifest={
+            "id": "typenx-addon-season-centralizer",
+            "name": "Season Centralizer",
+            "version": "0.1.0",
+            "description": "Combines split anime seasons from MAL, AniList, and Kitsu into one show.",
+            "icon": None,
+            "resources": ["catalog", "search", "anime_meta"],
+            "catalogs": [
+                {"id": "popular", "name": "Popular Anime", "content_type": "anime", "filters": []},
+                {"id": "airing", "name": "Airing Anime", "content_type": "anime", "filters": []},
+                {"id": "trending", "name": "Trending Anime", "content_type": "anime", "filters": []},
+            ],
+        },
+        handlers={"catalog": catalog, "search": search, "anime": anime},
+    )
+
+
+class UpstreamClient:
+    def get_json(self, base_url: str, path: str) -> Any:
+        return self._request(base_url, path)
+
+    def post_json(self, base_url: str, path: str, body: dict[str, Any]) -> Any:
+        return self._request(base_url, path, body)
+
+    def _request(self, base_url: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        request = Request(
+            urljoin(base_url.rstrip("/") + "/", path),
+            data=data,
+            headers={"content-type": "application/json", "accept": "application/json"},
+            method="POST" if body is not None else "GET",
+        )
+        with urlopen(request, timeout=12) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+def collect_previews(sources: list[Source], load) -> list[tuple[Source, AnimePreview]]:
+    items: list[tuple[Source, AnimePreview]] = []
+    for source in sources:
+        try:
+            response = load(source)
+        except (OSError, URLError, TimeoutError):
+            continue
+        for item in response.get("items", []):
+            items.append((source, item))
+    return items
+
+
+def centralize_source_previews(items: list[tuple[Source, AnimePreview]]) -> list[AnimePreview]:
+    groups: dict[tuple[str, str], list[tuple[Source, AnimePreview]]] = {}
+    for source, item in items:
+        key = (source.key, normalize_title_key(item["title"]))
+        groups.setdefault(key, []).append((source, item))
+
+    centralized: list[AnimePreview] = []
+    for group in groups.values():
+        sorted_group = sorted(
+            group,
+            key=lambda entry: (
+                season_number_of(entry[1]["title"]) or 1,
+                entry[1].get("year") or 0,
+                entry[1]["title"],
+            ),
+        )
+        primary_source, primary = sorted_group[0]
+        refs = [{"source": source.key, "id": item["id"]} for source, item in sorted_group]
+        centralized.append(
+            {
+                **primary,
+                "id": encode_refs(refs),
+                "title": base_show_title(primary["title"]),
+                "season_entries": [
+                    {
+                        "id": item["id"],
+                        "title": item["title"],
+                        "season_number": season_number_of(item["title"]),
+                        "year": item.get("year"),
+                        "episode_count": None,
+                        "source": source.key,
+                    }
+                    for source, item in sorted_group
+                ],
+                "external_source": primary_source.key,
+            }
+        )
+    return centralized
+
+
+def configured_sources() -> list[Source]:
+    raw_sources = os.environ.get("TYPENX_SEASON_SOURCES", ",".join(DEFAULT_SOURCES))
+    urls = [value.strip().rstrip("/") for value in raw_sources.split(",") if value.strip()]
+    return [Source(key=f"source-{index + 1}", base_url=url) for index, url in enumerate(urls)]
+
+
+def source_by_key(sources: list[Source], key: str) -> Source:
+    for source in sources:
+        if source.key == key:
+            return source
+    raise ValueError(f"Unknown upstream source: {key}")
+
+
+def encode_refs(refs: list[dict[str, str]]) -> str:
+    payload = json.dumps(refs, separators=(",", ":")).encode("utf-8")
+    token = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"central:{token}"
+
+
+def decode_refs(anime_id: str) -> list[dict[str, str]]:
+    if not anime_id.startswith("central:"):
+        raise ValueError("Season Centralizer anime ids must start with central:")
+    token = anime_id[len("central:") :]
+    padding = "=" * (-len(token) % 4)
+    refs = json.loads(base64.urlsafe_b64decode(token + padding).decode("utf-8"))
+    if not isinstance(refs, list) or not refs:
+        raise ValueError("Season Centralizer anime id did not include source refs")
+    return refs
+
+
+def main() -> None:
+    serve_typenx_addon(create_addon(), port=int(os.environ.get("PORT", "8790")))
