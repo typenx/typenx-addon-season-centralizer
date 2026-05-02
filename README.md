@@ -4,6 +4,8 @@ This addon sits in front of the MAL, AniList, and Kitsu metadata addons and pres
 
 For example, if upstream search returns `Attack on Titan`, `Attack on Titan Season 2`, and `Attack on Titan 3rd Season`, this addon returns one `Attack on Titan` result with all source season entries attached. Opening that result fetches each upstream season and merges the metadata into one show with season-numbered episodes.
 
+It is part of Typenx, a self-hostable anime discovery platform built around open addons. If cleaner anime libraries sound useful, star [typenx-core](https://github.com/typenx/typenx-core).
+
 ## Run
 
 ```powershell
